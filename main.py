@@ -52,25 +52,33 @@ def download_and_prepare_gdf(file_path: str, lat_col: str, lon_col: str) -> gpd.
     except Exception as e:
         raise RuntimeError(f"Failed to process file {file_path}: {e}")
 
+# In sagar-ml-service/main.py
+
 def run_geospatial_correlation(job_id: str, request: CorrelationRequest):
-    """The actual long-running analysis task."""
+    """The actual long-running analysis task with projection for accuracy."""
     try:
         jobs[job_id]['status'] = 'running'
         
-        # 1. Download and convert both files using their specific coordinate column names
+        # 1. Download and convert both files
         gdf1 = download_and_prepare_gdf(request.file1_path, request.file1_lat_col, request.file1_lon_col)
         gdf2 = download_and_prepare_gdf(request.file2_path, request.file2_lat_col, request.file2_lon_col)
 
-        # 2. Perform a spatial join
-        joined_gdf = gpd.sjoin_nearest(gdf1, gdf2, max_distance=0.1, how="inner")
+        # 2. NEW: Re-project to a projected CRS for accurate distance calculation
+        gdf1_projected = gdf1.to_crs("EPSG:3395")
+        gdf2_projected = gdf2.to_crs("EPSG:3395")
+
+        # 3. Perform the spatial join on the projected data
+        # Note: max_distance is now in meters. 10,000 meters = 10 km.
+        joined_gdf = gpd.sjoin_nearest(gdf1_projected, gdf2_projected, max_distance=10000, how="inner")
 
         if joined_gdf.empty:
-            raise ValueError("No matching data points found after spatial join. Check if the geographic areas overlap.")
+            raise ValueError("No matching data points found within 10km after spatial join.")
         
+        # ... (The rest of the function remains the same) ...
+
         if not all(col in joined_gdf.columns for col in [request.column1, request.column2]):
             raise ValueError("Correlation columns not found after spatial join.")
 
-        # 4. Calculate correlation and generate rich output
         correlation = joined_gdf[[request.column1, request.column2]].corr().iloc[0, 1]
         
         summary_text = f"The geospatial correlation between '{request.column1}' and '{request.column2}' is {correlation:.4f}."
@@ -94,7 +102,6 @@ def run_geospatial_correlation(job_id: str, request: CorrelationRequest):
             "values": heatmap.T.tolist()
         }
 
-        # 5. Store the final result
         jobs[job_id]['status'] = 'completed'
         jobs[job_id]['result'] = {
             "summary": summary_text,
