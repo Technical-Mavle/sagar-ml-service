@@ -1,6 +1,7 @@
 # In sagar-ml-service/main.py
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi.middleware.cors import CORSMiddleware # Import CORS
 from pydantic import BaseModel, Field
 from config import supabase
 import pandas as pd
@@ -14,7 +15,17 @@ from typing import Dict, Any
 app = FastAPI(
     title="SAGAR Advanced AI/ML Service",
     description="A service for running advanced geospatial and analytical tasks.",
-    version="2.1.0" # Version updated
+    version="2.1.0"
+)
+
+# --- NEW: Add CORS Middleware ---
+origins = ["*"]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # --- In-memory job store (for a real app, use Redis or a database) ---
@@ -26,7 +37,6 @@ class CorrelationRequest(BaseModel):
     file2_path: str = Field(..., example="temperature_data.parquet")
     column1: str = Field(..., example="individualCount")
     column2: str = Field(..., example="TO3")
-    # NEW: Specify coordinate columns for EACH file
     file1_lat_col: str = Field(default="decimalLatitude", example="decimalLatitude")
     file1_lon_col: str = Field(default="decimalLongitude", example="decimalLongitude")
     file2_lat_col: str = Field(default="lat", example="lat")
@@ -52,30 +62,22 @@ def download_and_prepare_gdf(file_path: str, lat_col: str, lon_col: str) -> gpd.
     except Exception as e:
         raise RuntimeError(f"Failed to process file {file_path}: {e}")
 
-# In sagar-ml-service/main.py
-
 def run_geospatial_correlation(job_id: str, request: CorrelationRequest):
     """The actual long-running analysis task with projection for accuracy."""
     try:
         jobs[job_id]['status'] = 'running'
         
-        # 1. Download and convert both files
         gdf1 = download_and_prepare_gdf(request.file1_path, request.file1_lat_col, request.file1_lon_col)
         gdf2 = download_and_prepare_gdf(request.file2_path, request.file2_lat_col, request.file2_lon_col)
 
-        # 2. NEW: Re-project to a projected CRS for accurate distance calculation
         gdf1_projected = gdf1.to_crs("EPSG:3395")
         gdf2_projected = gdf2.to_crs("EPSG:3395")
 
-        # 3. Perform the spatial join on the projected data
-        # Note: max_distance is now in meters. 10,000 meters = 10 km.
         joined_gdf = gpd.sjoin_nearest(gdf1_projected, gdf2_projected, max_distance=10000, how="inner")
 
         if joined_gdf.empty:
             raise ValueError("No matching data points found within 10km after spatial join.")
         
-        # ... (The rest of the function remains the same) ...
-
         if not all(col in joined_gdf.columns for col in [request.column1, request.column2]):
             raise ValueError("Correlation columns not found after spatial join.")
 
@@ -129,7 +131,7 @@ async def get_job_status(job_id: str):
     """Retrieves the status or result of a background job."""
     job = jobs.get(job_id)
     if not job:
-        raise HTTPException(status_code=404, detail="Job not found.")
+        raise HTTPException(status_code=444, detail="Job not found.") # Changed status to 444 for clarity
     
     if job['status'] == 'completed':
         return job['result']
