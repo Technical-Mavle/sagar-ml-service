@@ -5,3 +5,5 @@ python-dotenv
 pandas
 pyarrow
 scikit-learn
+geopandas
+shapely
