@@ -14,7 +14,7 @@ from typing import Dict, Any
 app = FastAPI(
     title="SAGAR Advanced AI/ML Service",
     description="A service for running advanced geospatial and analytical tasks.",
-    version="2.0.0"
+    version="2.1.0" # Version updated
 )
 
 # --- In-memory job store (for a real app, use Redis or a database) ---
@@ -25,9 +25,12 @@ class CorrelationRequest(BaseModel):
     file1_path: str = Field(..., example="occurrence.parquet")
     file2_path: str = Field(..., example="temperature_data.parquet")
     column1: str = Field(..., example="individualCount")
-    column2: str = Field(..., example="sea_surface_temp")
-    lat_col: str = Field(default="decimalLatitude", example="decimalLatitude")
-    lon_col: str = Field(default="decimalLongitude", example="decimalLongitude")
+    column2: str = Field(..., example="TO3")
+    # NEW: Specify coordinate columns for EACH file
+    file1_lat_col: str = Field(default="decimalLatitude", example="decimalLatitude")
+    file1_lon_col: str = Field(default="decimalLongitude", example="decimalLongitude")
+    file2_lat_col: str = Field(default="lat", example="lat")
+    file2_lon_col: str = Field(default="lon", example="lon")
 
 class JobResponse(BaseModel):
     job_id: str
@@ -40,11 +43,9 @@ def download_and_prepare_gdf(file_path: str, lat_col: str, lon_col: str) -> gpd.
         response = supabase.storage.from_('processed-data').download(file_path)
         df = pd.read_parquet(io.BytesIO(response))
 
-        # Validate required columns
         if not all(col in df.columns for col in [lat_col, lon_col]):
-            raise ValueError(f"Missing required coordinate columns '{lat_col}' or '{lon_col}'")
+            raise ValueError(f"Missing required coordinate columns '{lat_col}' or '{lon_col}' in file {file_path}")
         
-        # Create geometries from lat/lon
         geometry = gpd.points_from_xy(df[lon_col], df[lat_col])
         gdf = gpd.GeoDataFrame(df, geometry=geometry, crs="EPSG:4326")
         return gdf
@@ -56,18 +57,16 @@ def run_geospatial_correlation(job_id: str, request: CorrelationRequest):
     try:
         jobs[job_id]['status'] = 'running'
         
-        # 1. Download and convert both files to GeoDataFrames
-        gdf1 = download_and_prepare_gdf(request.file1_path, request.lat_col, request.lon_col)
-        gdf2 = download_and_prepare_gdf(request.file2_path, request.lat_col, request.lon_col) # Assuming same coord names
+        # 1. Download and convert both files using their specific coordinate column names
+        gdf1 = download_and_prepare_gdf(request.file1_path, request.file1_lat_col, request.file1_lon_col)
+        gdf2 = download_and_prepare_gdf(request.file2_path, request.file2_lat_col, request.file2_lon_col)
 
         # 2. Perform a spatial join
-        # This merges rows where geometries from gdf1 are spatially close to geometries in gdf2
         joined_gdf = gpd.sjoin_nearest(gdf1, gdf2, max_distance=0.1, how="inner")
 
         if joined_gdf.empty:
-            raise ValueError("No matching data points found after spatial join.")
+            raise ValueError("No matching data points found after spatial join. Check if the geographic areas overlap.")
         
-        # 3. Validate columns after join
         if not all(col in joined_gdf.columns for col in [request.column1, request.column2]):
             raise ValueError("Correlation columns not found after spatial join.")
 
@@ -75,7 +74,12 @@ def run_geospatial_correlation(job_id: str, request: CorrelationRequest):
         correlation = joined_gdf[[request.column1, request.column2]].corr().iloc[0, 1]
         
         summary_text = f"The geospatial correlation between '{request.column1}' and '{request.column2}' is {correlation:.4f}."
-        # ... (rest of summary logic) ...
+        if abs(correlation) > 0.7:
+            summary_text += " This indicates a strong correlation."
+        elif abs(correlation) > 0.4:
+            summary_text += " This indicates a moderate correlation."
+        else:
+            summary_text += " This indicates a weak or no correlation."
 
         plot_df = joined_gdf[[request.column1, request.column2]].dropna().to_dict(orient='records')
 
@@ -90,7 +94,7 @@ def run_geospatial_correlation(job_id: str, request: CorrelationRequest):
             "values": heatmap.T.tolist()
         }
 
-        # 5. Store the final result in the jobs dictionary
+        # 5. Store the final result
         jobs[job_id]['status'] = 'completed'
         jobs[job_id]['result'] = {
             "summary": summary_text,
@@ -105,22 +109,17 @@ def run_geospatial_correlation(job_id: str, request: CorrelationRequest):
 
 @app.post("/analyze/geospatial-correlation", response_model=JobResponse)
 async def create_geospatial_correlation_job(request: CorrelationRequest, background_tasks: BackgroundTasks):
-    """
-    Accepts a geospatial correlation job and runs it in the background.
-    """
+    """Accepts a geospatial correlation job and runs it in the background."""
     job_id = str(uuid.uuid4())
     jobs[job_id] = {"status": "pending"}
     
-    # Run the long task in the background
     background_tasks.add_task(run_geospatial_correlation, job_id, request)
     
     return {"job_id": job_id, "status": "pending", "message": "Job accepted and is running in the background."}
 
 @app.get("/status/{job_id}")
 async def get_job_status(job_id: str):
-    """
-    Retrieves the status or result of a background job.
-    """
+    """Retrieves the status or result of a background job."""
     job = jobs.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found.")
